@@ -2,6 +2,8 @@
 
 System tray launcher for XLink Kai on Linux.
 
+<img width="222" height="223" alt="image" src="https://github.com/user-attachments/assets/f93cb0f8-6dad-4bee-a977-a4e734a7219d" />
+
 ## Requirements
 
 An AppIndicator library is the only dependency not typically preinstalled:
