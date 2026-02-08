@@ -231,7 +231,6 @@ def main():
     icon_path = str(ICON_PATH) if ICON_PATH.exists() else "network-workgroup"
     indicator = AppIndicator.Indicator.new("xlink-kai", icon_path, AppIndicator.IndicatorCategory.APPLICATION_STATUS)
     indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
-    indicator.set_title("XLink Kai")
     indicator.set_menu(menu)
 
     if xlink.engine_path:
