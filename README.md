@@ -2,7 +2,7 @@
 
 System tray launcher for XLink Kai on Linux.
 
-<img width="222" height="223" alt="image" src="https://github.com/user-attachments/assets/f93cb0f8-6dad-4bee-a977-a4e734a7219d" />
+<img width="222" height="223" alt="image" src="https://github.com/user-attachments/assets/1f178798-f0f0-4bad-a7ae-cf3ac933cea0" />
 
 ## Requirements
 
@@ -47,7 +47,11 @@ If not found, the installer prompts for a path. Can also be set later from the t
 
 ### Network capabilities
 
-kaiengine needs `cap_net_raw` and `cap_net_admin` to capture and inject raw packets without root. The installer sets these via `setcap` (requires sudo). Skip with `--skip-caps` and either run kaiengine as root or set them manually:
+kaiengine needs `cap_net_raw` and `cap_net_admin` to capture and inject raw packets without root.
+
+The installer sets these via `sudo setcap` if an engine path is known. The tray app also checks on startup and when setting a new engine path — if capabilities are missing, it prompts with a polkit password dialog to grant them. If declined or if it fails, a copyable `setcap` command is shown.
+
+Skip during install with `--skip-caps`:
 
 ```bash
 sudo setcap cap_net_raw,cap_net_admin=eip /path/to/kaiengine
@@ -55,8 +59,8 @@ sudo setcap cap_net_raw,cap_net_admin=eip /path/to/kaiengine
 
 ## Tray Menu
 
-- **Open Web UI** — opens `http://localhost:34522` in browser
-- **Set Engine Path…** — file picker to change kaiengine binary, saves to config and restarts engine
+- **Open Web UI** — opens `http://localhost:34522` in browser (greyed out until engine is running with capabilities set)
+- **Set Engine Path…** — file picker to change kaiengine binary, prompts for capabilities if needed, saves to config and starts engine
 - **Autostart** — toggle launch on login
 - **Stop & Quit** — stops engine and exits
 
