@@ -10,7 +10,7 @@ from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
+from gi.repository import Gtk, GLib
 
 ENGINE_SEARCH_PATHS = [
     Path("/usr/bin/kaiengine"),
@@ -27,7 +27,7 @@ ICON_PATH = Path.home() / ".local/share/icons/xlink-kai.png"
 
 def find_engine():
     for p in ENGINE_SEARCH_PATHS:
-        if p.exists() and p.is_file():
+        if p.is_file() and os.access(p, os.X_OK):
             return str(p)
     return None
 
@@ -102,18 +102,36 @@ def show_error(title, message):
     dialog.destroy()
 
 def get_indicator():
-    try:
-        gi.require_version('AyatanaAppIndicator3', '0.1')
-        from gi.repository import AyatanaAppIndicator3
-        return AyatanaAppIndicator3
-    except (ImportError, ValueError):
-        pass
-    try:
-        gi.require_version('AppIndicator3', '0.1')
-        from gi.repository import AppIndicator3
-        return AppIndicator3
-    except (ImportError, ValueError):
-        pass
+    for name in ('AyatanaAppIndicator3', 'AppIndicator3'):
+        try:
+            gi.require_version(name, '0.1')
+            return __import__('gi.repository', fromlist=[name]).__dict__[name]
+        except (ImportError, ValueError, KeyError):
+            pass
+    return None
+
+def get_distro_packages():
+    """Return distro-specific install command, or None."""
+    ids = set()
+    if Path("/etc/os-release").exists():
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if line.startswith("ID="):
+                ids.add(line.split("=", 1)[1].strip('"').lower())
+            elif line.startswith("ID_LIKE="):
+                ids.update(line.split("=", 1)[1].strip('"').lower().split())
+    packages = [
+        ({"fedora", "rhel", "centos", "nobara", "bazzite", "ultramarine"},
+            "sudo dnf install python3-gobject libayatana-appindicator-gtk3"),
+        ({"ubuntu", "debian", "pop", "linuxmint", "elementary", "zorin"},
+            "sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1"),
+        ({"arch", "manjaro", "endeavouros", "garuda", "cachyos"},
+            "sudo pacman -S python-gobject libayatana-appindicator"),
+        ({"opensuse", "opensuse-leap", "opensuse-tumbleweed", "suse"},
+            "sudo zypper install python3-gobject typelib-1_0-AyatanaAppIndicator3-0_1"),
+    ]
+    for distro_ids, cmd in packages:
+        if ids & distro_ids:
+            return cmd
     return None
 
 class XLinkKai:
@@ -125,6 +143,11 @@ class XLinkKai:
     def start_engine(self):
         if not self.engine_path:
             return "Engine path not set"
+        engine = Path(self.engine_path)
+        if not engine.is_file():
+            return f"Not found: {self.engine_path}"
+        if not os.access(engine, os.X_OK):
+            return f"Not executable: {self.engine_path}"
         if self.engine_proc and self.engine_proc.poll() is None:
             return True
         try:
@@ -137,15 +160,15 @@ class XLinkKai:
             return str(e)
 
     def stop_engine(self):
-        if not self.engine_path:
+        if not self.engine_proc:
             return
-        subprocess.run(["pkill", "-f", self.engine_path], capture_output=True)
-        if self.engine_proc:
-            self.engine_proc.terminate()
-            try:
-                self.engine_proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.engine_proc.kill()
+        self.engine_proc.terminate()
+        try:
+            self.engine_proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self.engine_proc.kill()
+            self.engine_proc.wait(timeout=2)
+        self.engine_proc = None
 
     def open_ui(self):
         subprocess.Popen(["xdg-open", WEB_UI], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -155,14 +178,13 @@ def main():
     engine_path = cfg["engine"]
     config_path = cfg["config"]
 
-    if len(sys.argv) > 1:
-        if sys.argv[1] in ("-h", "--help"):
-            print(f"Usage: {sys.argv[0]}")
-            print(f"\nConfig: {CONFIG_FILE}")
-            print(f"\nEngine search paths:")
-            for p in ENGINE_SEARCH_PATHS:
-                print(f"  {'✓' if p.exists() else '✗'} {p}")
-            sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print(f"Usage: {sys.argv[0]}")
+        print(f"\nConfig: {CONFIG_FILE}")
+        print(f"\nEngine search paths:")
+        for p in ENGINE_SEARCH_PATHS:
+            print(f"  {'✓' if p.exists() else '✗'} {p}")
+        sys.exit(0)
 
     if not engine_path or not Path(engine_path).exists():
         if not CONFIG_FILE.exists():
@@ -173,14 +195,15 @@ def main():
     AppIndicator = get_indicator()
     if not AppIndicator:
         is_gnome = "gnome" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-        msg = "AppIndicator library not found.\n\nInstall:\n"
+        msg = "AppIndicator library not found.\n\n"
         if is_gnome:
-            msg += "  1. Extension: extensions.gnome.org/extension/615/appindicator-support/\n"
-            msg += "  2. Library: libayatana-appindicator-gtk3"
+            msg += "GNOME requires the AppIndicator extension:\n"
+            msg += "  extensions.gnome.org/extension/615/appindicator-support/\n\n"
+        distro_cmd = get_distro_packages()
+        if distro_cmd:
+            msg += f"Install:\n  {distro_cmd}"
         else:
-            msg += "  libayatana-appindicator-gtk3 (Fedora)\n"
-            msg += "  gir1.2-ayatanaappindicator3-0.1 (Debian/Ubuntu)\n"
-            msg += "  libayatana-appindicator (Arch)"
+            msg += "Install python3-gobject + libayatana-appindicator for your distro"
         show_error("XLink Kai Error", msg)
         sys.exit(1)
 
@@ -196,6 +219,9 @@ def main():
     def on_change_engine(_):
         path = choose_engine_path(xlink.engine_path)
         if not path:
+            return
+        if not os.access(path, os.X_OK):
+            show_error("XLink Kai Error", f"Selected file is not executable:\n{path}")
             return
         new_config = find_config(path)
         xlink.stop_engine()
@@ -238,7 +264,8 @@ def main():
         if result is not True:
             show_error("XLink Kai Error", f"Failed to start engine:\n{result}")
 
-    signal.signal(signal.SIGTERM, lambda *_: quit_app())
+    signal.signal(signal.SIGTERM, lambda *_: GLib.idle_add(quit_app))
+    signal.signal(signal.SIGINT, lambda *_: GLib.idle_add(quit_app))
     Gtk.main()
 
 if __name__ == "__main__":
