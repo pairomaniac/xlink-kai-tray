@@ -2,6 +2,8 @@
 
 System tray launcher for XLink Kai on Linux - makes using the program on Linux more user-friendly.
 
+<img width="215" height="215" alt="Screenshot_20260208_163817" src="https://github.com/user-attachments/assets/e1eacf40-68f3-48a4-ae12-68fc56ac8f26" />
+
 ## Requirements
 
 - Python 3
