@@ -20,7 +20,7 @@ RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[1;33m'
 BLUE=$'\033[0;34m' CYAN=$'\033[0;36m' BOLD=$'\033[1m' DIM=$'\033[2m' NC=$'\033[0m'
 
 die() { echo -e "${RED}Error:${NC} $1" >&2; exit 1; }
-ok() { echo -e "  ${GREEN}✓${NC} $1"; }
+ok() { echo -e "  ${GREEN}✔${NC} $1"; }
 info() { echo -e "  ${CYAN}→${NC} $1"; }
 warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 header() { echo -e "\n${BOLD}$1${NC}"; }
@@ -48,6 +48,13 @@ check_caps() {
     [[ -n "$1" && -f "$1" ]] && getcap "$1" 2>/dev/null | grep -q cap_net_raw
 }
 
+refresh_desktop_db() {
+    command -v update-desktop-database &>/dev/null && update-desktop-database "$APP_DIR" 2>/dev/null && ok "Updated MIME cache"
+    command -v xdg-desktop-menu &>/dev/null && xdg-desktop-menu forceupdate 2>/dev/null && ok "Refreshed menu"
+    [[ "${XDG_CURRENT_DESKTOP:-}" == *KDE* ]] && command -v kbuildsycoca6 &>/dev/null && kbuildsycoca6 --noincremental 2>/dev/null && ok "Refreshed KDE cache"
+    return 0
+}
+
 show_help() {
     cat << EOF
 ${BOLD}Usage:${NC} $0 [OPTIONS]
@@ -63,13 +70,13 @@ ${BOLD}Options:${NC}
 ${BOLD}Engine search paths:${NC}
 EOF
     for p in "${ENGINE_SEARCH_PATHS[@]}"; do
-        [[ -f "$p" ]] && echo -e "  ${GREEN}✓${NC} $p" || echo -e "  ${DIM}✗ $p${NC}"
+        [[ -f "$p" ]] && echo -e "  ${GREEN}✔${NC} $p" || echo -e "  ${DIM}✗ $p${NC}"
     done
 }
 
 uninstall() {
     echo -e "${BOLD}XLink Kai Tray - Uninstall${NC}"
-    echo "────────────────────────────"
+    echo "════════════════════════════"
 
     header "Stopping processes"
     pkill -f "$BIN_DIR/$SCRIPT_NAME" 2>/dev/null && ok "Stopped $SCRIPT_NAME" || info "Not running"
@@ -82,8 +89,7 @@ uninstall() {
     [[ -d "$CONFIG_DIR" ]] && { file_op "delete" "$CONFIG_DIR/"; rm -rf "$CONFIG_DIR"; }
 
     header "Updating desktop database"
-    command -v update-desktop-database &>/dev/null && update-desktop-database "$APP_DIR" 2>/dev/null && ok "Updated"
-    command -v kbuildsycoca6 &>/dev/null && kbuildsycoca6 --noincremental 2>/dev/null && ok "Refreshed KDE"
+    refresh_desktop_db
 
     echo -e "\n${GREEN}Uninstall complete${NC}"
     exit 0
@@ -99,17 +105,21 @@ check_indicator() {
 
     warn "AppIndicator not found"
     [[ -f /etc/os-release ]] && . /etc/os-release
-    case "${ID:-}" in
-        fedora|rhel|centos|nobara|bazzite|ultramarine)
-            info "sudo dnf install python3-gobject libayatana-appindicator-gtk3" ;;
-        ubuntu|debian|pop|mint|elementary|zorin)
-            info "sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1" ;;
-        arch|manjaro|endeavouros|garuda|cachyos)
-            info "sudo pacman -S python-gobject libayatana-appindicator" ;;
-        opensuse*|suse)
-            info "sudo zypper install python3-gobject typelib-1_0-AyatanaAppIndicator3-0_1" ;;
-        *) info "Install python3-gobject + libayatana-appindicator for your distro" ;;
-    esac
+    _ids="${ID:-} ${ID_LIKE:-}"
+    _matched=false
+    for _id in $_ids; do
+        case "$_id" in
+            fedora|rhel|centos|nobara|bazzite|ultramarine)
+                info "sudo dnf install python3-gobject libayatana-appindicator-gtk3"; _matched=true; break ;;
+            ubuntu|debian|pop|linuxmint|elementary|zorin)
+                info "sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1"; _matched=true; break ;;
+            arch|manjaro|endeavouros|garuda|cachyos)
+                info "sudo pacman -S python-gobject libayatana-appindicator"; _matched=true; break ;;
+            opensuse*|suse)
+                info "sudo zypper install python3-gobject typelib-1_0-AyatanaAppIndicator3-0_1"; _matched=true; break ;;
+        esac
+    done
+    [[ "$_matched" == "false" ]] && info "Install python3-gobject + libayatana-appindicator for your distro"
     die "Install dependencies and re-run"
 }
 
@@ -162,16 +172,15 @@ StartupNotify=false
 EOF
 
     header "Updating desktop database"
-    command -v update-desktop-database &>/dev/null && update-desktop-database "$APP_DIR" 2>/dev/null && ok "Updated"
-    command -v kbuildsycoca6 &>/dev/null && kbuildsycoca6 --noincremental 2>/dev/null && ok "Refreshed KDE"
+    refresh_desktop_db
 }
 
-ENGINE_PATH="" CONFIG_PATH="" SKIP_CAPS=false AUTOSTART=false
+ENGINE_PATH="" CONFIG_PATH="" SKIP_CAPS=false AUTOSTART=false DO_UNINSTALL=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --help|-h) show_help; exit 0 ;;
-        --uninstall) uninstall ;;
+        --uninstall) DO_UNINSTALL=true; shift ;;
         --engine) [[ -z "${2:-}" || "$2" == --* ]] && die "--engine requires a path"; ENGINE_PATH="$2"; shift 2 ;;
         --config) [[ -z "${2:-}" || "$2" == --* ]] && die "--config requires a path"; CONFIG_PATH="$2"; shift 2 ;;
         --skip-caps) SKIP_CAPS=true; shift ;;
@@ -180,10 +189,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -f "$SCRIPT_DIR/$SCRIPT_NAME" ]] || die "$SCRIPT_NAME not found"
+[[ "$DO_UNINSTALL" == "true" ]] && uninstall
+[[ -f "$SCRIPT_DIR/$SCRIPT_NAME" ]] || die "$SCRIPT_NAME not found in $SCRIPT_DIR"
 
 echo -e "${BOLD}XLink Kai Tray - Install${NC}"
-echo "────────────────────────────"
+echo "════════════════════════════"
 
 header "Locating kaiengine"
 if [[ -z "$ENGINE_PATH" ]]; then
@@ -197,10 +207,25 @@ if [[ -z "$ENGINE_PATH" ]]; then
         fi
     done
 else
-    [[ -f "$ENGINE_PATH" ]] && ok "Using: $ENGINE_PATH" || echo -e "  ${RED}✗${NC} Not found: $ENGINE_PATH"
+    if [[ -f "$ENGINE_PATH" ]]; then
+        ok "Using: $ENGINE_PATH"
+    else
+        echo -e "  ${RED}✗${NC} Not found: $ENGINE_PATH"
+        ENGINE_PATH=""
+    fi
 fi
 
-[[ -z "$ENGINE_PATH" || ! -f "$ENGINE_PATH" ]] && { warn "kaiengine not found"; read -p "  Enter path (Enter to skip): " -r p; [[ -n "$p" ]] && ENGINE_PATH="$p"; }
+if [[ -z "$ENGINE_PATH" || ! -f "$ENGINE_PATH" ]]; then
+    warn "kaiengine not found"
+    read -p "  Enter path (Enter to skip): " -r p
+    if [[ -n "$p" ]]; then
+        if [[ -f "$p" ]]; then
+            ENGINE_PATH="$p"
+        else
+            warn "File not found: $p"
+        fi
+    fi
+fi
 
 if [[ -n "$ENGINE_PATH" && -z "$CONFIG_PATH" ]]; then
     for name in kaiengine.conf kaid.conf; do
@@ -221,6 +246,12 @@ if [[ "$AUTOSTART" == "true" ]]; then
     file_op "copy" "$AUTOSTART_DIR/xlink-kai.desktop"
     cp "$APP_DIR/xlink-kai.desktop" "$AUTOSTART_DIR/xlink-kai.desktop"
     ok "Enabled"
+fi
+
+if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+    header "Warning"
+    warn "$BIN_DIR is not in your \$PATH"
+    info "Add to your shell rc:  export PATH=\"$BIN_DIR:\$PATH\""
 fi
 
 echo -e "\n${GREEN}Done${NC}"
