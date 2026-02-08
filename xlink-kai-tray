@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""XLink Kai tray launcher."""
+import os
+import sys
+import signal
+import subprocess
+import shutil
+import configparser
+from pathlib import Path
+
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+
+ENGINE_SEARCH_PATHS = [
+    Path("/usr/bin/kaiengine"),
+    Path("/opt/kaiEngine-standalone/kaiengine"),
+    Path.home() / ".local/bin/kaiengine",
+    Path.home() / "kaiEngine-standalone/kaiengine",
+]
+
+WEB_UI = "http://localhost:34522"
+CONFIG_FILE = Path.home() / ".config/xlink-kai/settings.conf"
+DESKTOP_FILE = Path.home() / ".local/share/applications/xlink-kai.desktop"
+AUTOSTART_FILE = Path.home() / ".config/autostart/xlink-kai.desktop"
+ICON_PATH = Path.home() / ".local/share/icons/xlink-kai.png"
+
+def find_engine():
+    for p in ENGINE_SEARCH_PATHS:
+        if p.exists() and p.is_file():
+            return str(p)
+    return None
+
+def find_config(engine_path):
+    if not engine_path:
+        return None
+    engine_dir = Path(engine_path).parent
+    for name in ["kaiengine.conf", "kaid.conf"]:
+        conf = engine_dir / name
+        if conf.exists():
+            return str(conf)
+    xlink_conf = Path.home() / ".xlink/kaiengine.conf"
+    if xlink_conf.exists():
+        return str(xlink_conf)
+    return None
+
+def load_config():
+    cfg = {"engine": None, "config": None}
+    if CONFIG_FILE.exists():
+        parser = configparser.ConfigParser()
+        parser.read(CONFIG_FILE)
+        if parser.has_section("xlink-kai"):
+            engine = parser.get("xlink-kai", "engine_path", fallback="")
+            config = parser.get("xlink-kai", "config_path", fallback="")
+            cfg["engine"] = engine or None
+            cfg["config"] = config or None
+    if not cfg["engine"]:
+        cfg["engine"] = find_engine()
+    if cfg["engine"] and not cfg["config"]:
+        cfg["config"] = find_config(cfg["engine"])
+    return cfg
+
+def save_config(engine, config):
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    parser["xlink-kai"] = {"engine_path": engine or "", "config_path": config or ""}
+    with open(CONFIG_FILE, "w") as f:
+        parser.write(f)
+
+def is_autostart_enabled():
+    return AUTOSTART_FILE.exists()
+
+def set_autostart(enabled):
+    if enabled:
+        if DESKTOP_FILE.exists():
+            AUTOSTART_FILE.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(DESKTOP_FILE, AUTOSTART_FILE)
+    else:
+        AUTOSTART_FILE.unlink(missing_ok=True)
+
+def choose_engine_path(current_path):
+    dialog = Gtk.FileChooserDialog(
+        title="Select kaiengine",
+        action=Gtk.FileChooserAction.OPEN,
+    )
+    dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+    if current_path and Path(current_path).parent.exists():
+        dialog.set_current_folder(str(Path(current_path).parent))
+    response = dialog.run()
+    path = dialog.get_filename() if response == Gtk.ResponseType.OK else None
+    dialog.destroy()
+    return path
+
+def show_error(title, message):
+    dialog = Gtk.MessageDialog(
+        message_type=Gtk.MessageType.ERROR,
+        buttons=Gtk.ButtonsType.OK,
+        text=title,
+        secondary_text=message
+    )
+    dialog.run()
+    dialog.destroy()
+
+def get_indicator():
+    try:
+        gi.require_version('AyatanaAppIndicator3', '0.1')
+        from gi.repository import AyatanaAppIndicator3
+        return AyatanaAppIndicator3
+    except (ImportError, ValueError):
+        pass
+    try:
+        gi.require_version('AppIndicator3', '0.1')
+        from gi.repository import AppIndicator3
+        return AppIndicator3
+    except (ImportError, ValueError):
+        pass
+    return None
+
+class XLinkKai:
+    def __init__(self, engine_path, config_path):
+        self.engine_path = engine_path
+        self.config_path = config_path
+        self.engine_proc = None
+
+    def start_engine(self):
+        if not self.engine_path:
+            return "Engine path not set"
+        if self.engine_proc and self.engine_proc.poll() is None:
+            return True
+        try:
+            args = [self.engine_path]
+            if self.config_path and Path(self.config_path).exists():
+                args.extend(["--configfile", self.config_path])
+            self.engine_proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception as e:
+            return str(e)
+
+    def stop_engine(self):
+        if not self.engine_path:
+            return
+        subprocess.run(["pkill", "-f", self.engine_path], capture_output=True)
+        if self.engine_proc:
+            self.engine_proc.terminate()
+            try:
+                self.engine_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.engine_proc.kill()
+
+    def open_ui(self):
+        subprocess.Popen(["xdg-open", WEB_UI], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def main():
+    cfg = load_config()
+    engine_path = cfg["engine"]
+    config_path = cfg["config"]
+
+    if len(sys.argv) > 1:
+        if sys.argv[1] in ("-h", "--help"):
+            print(f"Usage: {sys.argv[0]}")
+            print(f"\nConfig: {CONFIG_FILE}")
+            print(f"\nEngine search paths:")
+            for p in ENGINE_SEARCH_PATHS:
+                print(f"  {'✓' if p.exists() else '✗'} {p}")
+            sys.exit(0)
+
+    if not engine_path or not Path(engine_path).exists():
+        if not CONFIG_FILE.exists():
+            save_config(None, None)
+        engine_path = None
+        config_path = None
+
+    AppIndicator = get_indicator()
+    if not AppIndicator:
+        is_gnome = "gnome" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+        msg = "AppIndicator library not found.\n\nInstall:\n"
+        if is_gnome:
+            msg += "  1. Extension: extensions.gnome.org/extension/615/appindicator-support/\n"
+            msg += "  2. Library: libayatana-appindicator-gtk3"
+        else:
+            msg += "  libayatana-appindicator-gtk3 (Fedora)\n"
+            msg += "  gir1.2-ayatanaappindicator3-0.1 (Debian/Ubuntu)\n"
+            msg += "  libayatana-appindicator (Arch)"
+        show_error("XLink Kai Error", msg)
+        sys.exit(1)
+
+    xlink = XLinkKai(engine_path, config_path)
+
+    menu = Gtk.Menu()
+    item_open = Gtk.MenuItem(label="Open Web UI")
+    item_open.connect("activate", lambda _: xlink.open_ui())
+    item_open.set_sensitive(xlink.engine_path is not None)
+    menu.append(item_open)
+    menu.append(Gtk.SeparatorMenuItem())
+
+    def on_change_engine(_):
+        path = choose_engine_path(xlink.engine_path)
+        if not path:
+            return
+        new_config = find_config(path)
+        xlink.stop_engine()
+        xlink.engine_path = path
+        xlink.config_path = new_config
+        save_config(path, new_config)
+        result = xlink.start_engine()
+        if result is not True:
+            show_error("XLink Kai Error", f"Failed to start engine:\n{result}")
+        else:
+            item_open.set_sensitive(True)
+
+    item_engine = Gtk.MenuItem(label="Set Engine Path…")
+    item_engine.connect("activate", on_change_engine)
+    menu.append(item_engine)
+
+    item_autostart = Gtk.CheckMenuItem(label="Autostart")
+    item_autostart.set_active(is_autostart_enabled())
+    item_autostart.connect("toggled", lambda w: set_autostart(w.get_active()))
+    menu.append(item_autostart)
+
+    menu.append(Gtk.SeparatorMenuItem())
+
+    def quit_app(_=None):
+        xlink.stop_engine()
+        Gtk.main_quit()
+
+    item_quit = Gtk.MenuItem(label="Stop & Quit")
+    item_quit.connect("activate", quit_app)
+    menu.append(item_quit)
+    menu.show_all()
+
+    icon_path = str(ICON_PATH) if ICON_PATH.exists() else "network-workgroup"
+    indicator = AppIndicator.Indicator.new("xlink-kai", icon_path, AppIndicator.IndicatorCategory.APPLICATION_STATUS)
+    indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+    indicator.set_menu(menu)
+
+    if xlink.engine_path:
+        result = xlink.start_engine()
+        if result is not True:
+            show_error("XLink Kai Error", f"Failed to start engine:\n{result}")
+
+    signal.signal(signal.SIGTERM, lambda *_: quit_app())
+    Gtk.main()
+
+if __name__ == "__main__":
+    main()
