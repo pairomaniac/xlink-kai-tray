@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""XLink Kai tray launcher."""
 import os
 import sys
 import signal
@@ -10,7 +9,7 @@ from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, Gdk, GLib
 
 ENGINE_SEARCH_PATHS = [
     Path("/usr/bin/kaiengine"),
@@ -24,6 +23,21 @@ CONFIG_FILE = Path.home() / ".config/xlink-kai/settings.conf"
 DESKTOP_FILE = Path.home() / ".local/share/applications/xlink-kai.desktop"
 AUTOSTART_FILE = Path.home() / ".config/autostart/xlink-kai.desktop"
 ICON_PATH = Path.home() / ".local/share/icons/xlink-kai.png"
+LOCK_FILE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "xlink-kai-tray.pid"
+
+def check_single_instance():
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            os.kill(pid, 0)
+            return False
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+def remove_lock():
+    LOCK_FILE.unlink(missing_ok=True)
 
 def find_engine():
     for p in ENGINE_SEARCH_PATHS:
@@ -101,6 +115,43 @@ def show_error(title, message):
     dialog.run()
     dialog.destroy()
 
+def show_command_dialog(title, message, command):
+    dialog = Gtk.MessageDialog(
+        message_type=Gtk.MessageType.INFO,
+        text=title,
+        secondary_text=message
+    )
+
+    content = dialog.get_content_area()
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+    box.set_margin_start(12)
+    box.set_margin_end(12)
+    box.set_margin_bottom(8)
+
+    entry = Gtk.Entry()
+    entry.set_text(command)
+    entry.set_editable(False)
+    entry.set_can_focus(True)
+    entry.set_hexpand(True)
+    box.pack_start(entry, True, True, 0)
+
+    copy_btn = Gtk.Button(label="Copy")
+    def on_copy(_):
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(command, -1)
+        clipboard.store()
+        copy_btn.set_label("Copied!")
+        GLib.timeout_add(1500, lambda: copy_btn.set_label("Copy") or False)
+    copy_btn.connect("clicked", on_copy)
+    box.pack_start(copy_btn, False, False, 0)
+
+    content.pack_start(box, False, False, 0)
+    box.show_all()
+
+    dialog.add_button("OK", Gtk.ResponseType.OK)
+    dialog.run()
+    dialog.destroy()
+
 def get_indicator():
     for name in ('AyatanaAppIndicator3', 'AppIndicator3'):
         try:
@@ -111,7 +162,6 @@ def get_indicator():
     return None
 
 def get_distro_packages():
-    """Return distro-specific install command, or None."""
     ids = set()
     if Path("/etc/os-release").exists():
         for line in Path("/etc/os-release").read_text().splitlines():
@@ -133,6 +183,56 @@ def get_distro_packages():
         if ids & distro_ids:
             return cmd
     return None
+
+def has_caps(path):
+    try:
+        result = subprocess.run(["getcap", path], capture_output=True, text=True)
+        return "cap_net_raw" in result.stdout
+    except FileNotFoundError:
+        return False
+
+def set_caps(path):
+    try:
+        result = subprocess.run(
+            ["pkexec", "setcap", "cap_net_raw,cap_net_admin=eip", path],
+            capture_output=True)
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+def setcap_command(path):
+    return f"sudo setcap cap_net_raw,cap_net_admin=eip {path}"
+
+def prompt_caps(path):
+    if has_caps(path):
+        return True
+    dialog = Gtk.MessageDialog(
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.NONE,
+        text="Network capabilities required",
+        secondary_text=(
+            "kaiengine needs raw network access (cap_net_raw) to tunnel "
+            "game traffic. Without this, the engine cannot function.\n\n"
+            "Grant permission now? (requires password)"
+        )
+    )
+    dialog.add_buttons("Set Manually", Gtk.ResponseType.CANCEL, "Grant", Gtk.ResponseType.YES)
+    dialog.set_default_response(Gtk.ResponseType.YES)
+    response = dialog.run()
+    dialog.destroy()
+    if response == Gtk.ResponseType.YES:
+        if set_caps(path):
+            return True
+        show_command_dialog(
+            "Failed to set capabilities",
+            "Run this command in a terminal:",
+            setcap_command(path))
+    else:
+        show_command_dialog(
+            "Capabilities not set",
+            "Engine will not start without network capabilities.\nRun this command in a terminal:",
+            setcap_command(path))
+    return False
 
 class XLinkKai:
     def __init__(self, engine_path, config_path):
@@ -186,6 +286,10 @@ def main():
             print(f"  {'✓' if p.exists() else '✗'} {p}")
         sys.exit(0)
 
+    if not check_single_instance():
+        show_error("XLink Kai", "XLink Kai Tray is already running.")
+        sys.exit(1)
+
     if not engine_path or not Path(engine_path).exists():
         if not CONFIG_FILE.exists():
             save_config(None, None)
@@ -194,6 +298,7 @@ def main():
 
     AppIndicator = get_indicator()
     if not AppIndicator:
+        remove_lock()
         is_gnome = "gnome" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
         msg = "AppIndicator library not found.\n\n"
         if is_gnome:
@@ -212,9 +317,21 @@ def main():
     menu = Gtk.Menu()
     item_open = Gtk.MenuItem(label="Open Web UI")
     item_open.connect("activate", lambda _: xlink.open_ui())
-    item_open.set_sensitive(xlink.engine_path is not None)
+    item_open.set_sensitive(False)
     menu.append(item_open)
     menu.append(Gtk.SeparatorMenuItem())
+
+    def start_with_caps(path):
+        if not prompt_caps(path):
+            item_open.set_sensitive(False)
+            return False
+        result = xlink.start_engine()
+        if result is not True:
+            show_error("XLink Kai Error", f"Failed to start engine:\n{result}")
+            item_open.set_sensitive(False)
+            return False
+        item_open.set_sensitive(True)
+        return True
 
     def on_change_engine(_):
         path = choose_engine_path(xlink.engine_path)
@@ -223,16 +340,11 @@ def main():
         if not os.access(path, os.X_OK):
             show_error("XLink Kai Error", f"Selected file is not executable:\n{path}")
             return
-        new_config = find_config(path)
         xlink.stop_engine()
         xlink.engine_path = path
-        xlink.config_path = new_config
-        save_config(path, new_config)
-        result = xlink.start_engine()
-        if result is not True:
-            show_error("XLink Kai Error", f"Failed to start engine:\n{result}")
-        else:
-            item_open.set_sensitive(True)
+        xlink.config_path = find_config(path)
+        save_config(path, xlink.config_path)
+        start_with_caps(path)
 
     item_engine = Gtk.MenuItem(label="Set Engine Path…")
     item_engine.connect("activate", on_change_engine)
@@ -247,6 +359,7 @@ def main():
 
     def quit_app(_=None):
         xlink.stop_engine()
+        remove_lock()
         Gtk.main_quit()
 
     item_quit = Gtk.MenuItem(label="Stop & Quit")
@@ -260,9 +373,7 @@ def main():
     indicator.set_menu(menu)
 
     if xlink.engine_path:
-        result = xlink.start_engine()
-        if result is not True:
-            show_error("XLink Kai Error", f"Failed to start engine:\n{result}")
+        start_with_caps(xlink.engine_path)
 
     signal.signal(signal.SIGTERM, lambda *_: GLib.idle_add(quit_app))
     signal.signal(signal.SIGINT, lambda *_: GLib.idle_add(quit_app))
