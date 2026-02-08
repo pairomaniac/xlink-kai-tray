@@ -201,7 +201,7 @@ def set_caps(path):
         return False
 
 def setcap_command(path):
-    return f"sudo setcap cap_net_raw,cap_net_admin=eip {path}"
+    return f"sudo setcap cap_net_raw,cap_net_admin=eip '{path}'"
 
 def prompt_caps(path):
     if has_caps(path):
