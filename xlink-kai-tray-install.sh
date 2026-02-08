@@ -151,6 +151,17 @@ install_files() {
         warn "xlink-kai.png not found, place it in $ICON_DIR manually"
     fi
 
+    if [[ -f "$CONFIG_DIR/settings.conf" ]]; then
+        EXISTING_ENGINE=$(python3 -c "
+import configparser; c = configparser.ConfigParser(); c.read('$CONFIG_DIR/settings.conf')
+print(c.get('xlink-kai','engine_path',fallback=''))" 2>/dev/null)
+        EXISTING_CONFIG=$(python3 -c "
+import configparser; c = configparser.ConfigParser(); c.read('$CONFIG_DIR/settings.conf')
+print(c.get('xlink-kai','config_path',fallback=''))" 2>/dev/null)
+        [[ -z "$ENGINE_PATH" && -n "$EXISTING_ENGINE" && -f "$EXISTING_ENGINE" ]] && { ENGINE_PATH="$EXISTING_ENGINE"; info "Kept existing engine: $ENGINE_PATH"; }
+        [[ -z "$CONFIG_PATH" && -n "$EXISTING_CONFIG" && -f "$EXISTING_CONFIG" ]] && CONFIG_PATH="$EXISTING_CONFIG"
+    fi
+
     file_op "write" "$CONFIG_DIR/settings.conf"
     cat > "$CONFIG_DIR/settings.conf" << EOF
 [xlink-kai]
@@ -195,6 +206,8 @@ done
 echo -e "${BOLD}XLink Kai Tray - Install${NC}"
 echo "════════════════════════════"
 
+check_indicator
+
 header "Locating kaiengine"
 if [[ -z "$ENGINE_PATH" ]]; then
     for p in "${ENGINE_SEARCH_PATHS[@]}"; do
@@ -236,7 +249,6 @@ fi
 echo -e "\n  Engine: ${CYAN}${ENGINE_PATH:-<not set>}${NC}"
 echo -e "  Config: ${CYAN}${CONFIG_PATH:-<not set>}${NC}"
 
-check_indicator
 [[ "$SKIP_CAPS" == "false" ]] && set_caps
 install_files
 
